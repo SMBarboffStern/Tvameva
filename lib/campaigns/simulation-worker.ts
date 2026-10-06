@@ -2,48 +2,101 @@ import type {
   SupabaseClient,
 } from "@supabase/supabase-js";
 
+import {
+  getMessagingProvider,
+} from "@/lib/messaging/provider";
+
 // =====================================================
 // TIPOS
 // =====================================================
 
 type WorkerSchedule = {
-  windowStart: string;
-  windowEnd: string;
+  windowStart:
+    string;
 
-  maxPerHour: number;
-  maxPerDay: number;
+  windowEnd:
+    string;
 
-  allowedWeekdays: number[];
+  maxPerHour:
+    number;
+
+  maxPerDay:
+    number;
+
+  allowedWeekdays:
+    number[];
 };
 
 type CampaignRow = {
-  id: string;
+  id:
+    string;
 
-  organization_id: string;
+  organization_id:
+    string;
 
-  status: string;
+  status:
+    string;
 
-  execution_mode: string;
+  execution_mode:
+    "simulation" |
+    "live";
 
-  schedule_config: unknown;
+  schedule_config:
+    unknown;
 
   next_run_at:
     string | null;
 };
 
+type RecipientRow = {
+  id:
+    string;
+
+  contact_id:
+    string;
+
+  rendered_message:
+    string;
+
+  attempt_count:
+    number;
+
+  scheduled_for:
+    string | null;
+};
+
+type ContactRow = {
+  id:
+    string;
+
+  phone_e164:
+    string;
+
+  opted_in:
+    boolean;
+
+  status:
+    string;
+};
+
 export type SimulationWorkerResult = {
-  campaignId: string;
+  campaignId:
+    string;
 
-  processed: number;
+  processed:
+    number;
 
-  remaining: number;
+  remaining:
+    number;
 
-  completed: boolean;
+  completed:
+    boolean;
 
   nextRunAt:
     string | null;
 
-  message: string;
+  message:
+    string;
 };
 
 // =====================================================
@@ -143,7 +196,8 @@ export async function processSimulationCampaign({
     return {
       campaignId,
 
-      processed: 0,
+      processed:
+        0,
 
       remaining:
         await countPrepared(
@@ -151,7 +205,8 @@ export async function processSimulationCampaign({
           campaignId
         ),
 
-      completed: false,
+      completed:
+        false,
 
       nextRunAt:
         campaign.next_run_at,
@@ -162,33 +217,13 @@ export async function processSimulationCampaign({
   }
 
   // ===================================================
-  // SIMULATION ONLY
+  // PROVIDER
   // ===================================================
 
-  if (
-    campaign.execution_mode !==
-    "simulation"
-  ) {
-    return {
-      campaignId,
-
-      processed: 0,
-
-      remaining:
-        await countPrepared(
-          supabase,
-          campaignId
-        ),
-
-      completed: false,
-
-      nextRunAt:
-        campaign.next_run_at,
-
-      message:
-        "La campaña no está en modo simulación.",
-    };
-  }
+  const provider =
+    getMessagingProvider(
+      campaign.execution_mode
+    );
 
   const schedule =
     parseScheduleConfig(
@@ -230,7 +265,8 @@ export async function processSimulationCampaign({
     return {
       campaignId,
 
-      processed: 0,
+      processed:
+        0,
 
       remaining:
         await countPrepared(
@@ -238,7 +274,8 @@ export async function processSimulationCampaign({
           campaignId
         ),
 
-      completed: false,
+      completed:
+        false,
 
       nextRunAt:
         nextAllowed.toISOString(),
@@ -249,7 +286,7 @@ export async function processSimulationCampaign({
   }
 
   // ===================================================
-  // LAST HOUR
+  // PROCESSED LAST HOUR
   // ===================================================
 
   const hourAgo =
@@ -281,17 +318,24 @@ export async function processSimulationCampaign({
       "campaign_id",
       campaignId
     )
-    .eq(
+    .in(
       "status",
-      "simulated"
+      [
+        "simulated",
+        "sent",
+      ]
     )
     .gte(
-      "simulated_at",
+      campaign.execution_mode ===
+      "simulation"
+        ? "simulated_at"
+        : "sent_at",
+
       hourAgo.toISOString()
     );
 
   // ===================================================
-  // TODAY
+  // PROCESSED TODAY
   // ===================================================
 
   const startToday =
@@ -320,12 +364,19 @@ export async function processSimulationCampaign({
       "campaign_id",
       campaignId
     )
-    .eq(
+    .in(
       "status",
-      "simulated"
+      [
+        "simulated",
+        "sent",
+      ]
     )
     .gte(
-      "simulated_at",
+      campaign.execution_mode ===
+      "simulation"
+        ? "simulated_at"
+        : "sent_at",
+
       startToday.toISOString()
     );
 
@@ -353,16 +404,24 @@ export async function processSimulationCampaign({
     );
 
   // ===================================================
-  // HOUR LIMIT
+  // LIMITS
   // ===================================================
 
   if (
-    availableHour <= 0
+    availableHour <=
+    0
   ) {
     const nextRun =
-      await calculateNextHourlyAvailability(
-        supabase,
-        campaignId,
+      new Date(
+        now.getTime() +
+          60 *
+            60 *
+            1000
+      );
+
+    const effective =
+      getEffectiveNextRun(
+        nextRun,
         now,
         schedule
       );
@@ -373,7 +432,7 @@ export async function processSimulationCampaign({
       campaign.organization_id,
       {
         nextRunAt:
-          nextRun.toISOString(),
+          effective.toISOString(),
 
         lastRunAt:
           now.toISOString(),
@@ -383,7 +442,8 @@ export async function processSimulationCampaign({
     return {
       campaignId,
 
-      processed: 0,
+      processed:
+        0,
 
       remaining:
         await countPrepared(
@@ -391,22 +451,20 @@ export async function processSimulationCampaign({
           campaignId
         ),
 
-      completed: false,
+      completed:
+        false,
 
       nextRunAt:
-        nextRun.toISOString(),
+        effective.toISOString(),
 
       message:
         "Se alcanzó el máximo configurado para la última hora.",
     };
   }
 
-  // ===================================================
-  // DAILY LIMIT
-  // ===================================================
-
   if (
-    availableDay <= 0
+    availableDay <=
+    0
   ) {
     const nextRun =
       findNextAllowedDayStart(
@@ -430,7 +488,8 @@ export async function processSimulationCampaign({
     return {
       campaignId,
 
-      processed: 0,
+      processed:
+        0,
 
       remaining:
         await countPrepared(
@@ -438,7 +497,8 @@ export async function processSimulationCampaign({
           campaignId
         ),
 
-      completed: false,
+      completed:
+        false,
 
       nextRunAt:
         nextRun.toISOString(),
@@ -448,32 +508,8 @@ export async function processSimulationCampaign({
     };
   }
 
-  if (
-    batchLimit <= 0
-  ) {
-    return {
-      campaignId,
-
-      processed: 0,
-
-      remaining:
-        await countPrepared(
-          supabase,
-          campaignId
-        ),
-
-      completed: false,
-
-      nextRunAt:
-        campaign.next_run_at,
-
-      message:
-        "No hay capacidad disponible para procesar el lote.",
-    };
-  }
-
   // ===================================================
-  // DUE RECIPIENTS
+  // RECIPIENTS DUE
   // ===================================================
 
   const {
@@ -489,6 +525,8 @@ export async function processSimulationCampaign({
     .select(
       `
         id,
+        contact_id,
+        rendered_message,
         attempt_count,
         scheduled_for
       `
@@ -522,10 +560,6 @@ export async function processSimulationCampaign({
     );
   }
 
-  // ===================================================
-  // NO DUE RECIPIENTS
-  // ===================================================
-
   if (
     !dueRecipients ||
     dueRecipients.length ===
@@ -540,54 +574,192 @@ export async function processSimulationCampaign({
   }
 
   // ===================================================
-  // PROCESS
+  // PROCESS RECIPIENTS
   // ===================================================
 
   let processed =
     0;
 
   for (
-    const recipient of
+    const rawRecipient of
     dueRecipients
   ) {
-    const processedAt =
-      new Date().toISOString();
+    const recipient =
+      rawRecipient as RecipientRow;
 
-    /*
-     * El WHERE status=prepared
-     * evita que el mismo registro
-     * sea procesado dos veces si
-     * coinciden dos ejecuciones.
-     */
+    // ===============================================
+    // CONTACT
+    // ===============================================
 
     const {
       data:
-        updated,
+        contactData,
 
       error:
-        updateError,
+        contactError,
+    } = await supabase
+      .from(
+        "contacts"
+      )
+      .select(
+        `
+          id,
+          phone_e164,
+          opted_in,
+          status
+        `
+      )
+      .eq(
+        "id",
+        recipient.contact_id
+      )
+      .eq(
+        "organization_id",
+        campaign.organization_id
+      )
+      .maybeSingle();
+
+    if (
+      contactError ||
+      !contactData
+    ) {
+      await markFailed({
+        supabase,
+
+        recipientId:
+          recipient.id,
+
+        campaignId,
+
+        attemptCount:
+          recipient.attempt_count,
+
+        error:
+          "No se encontró el contacto.",
+      });
+
+      continue;
+    }
+
+    const contact =
+      contactData as ContactRow;
+
+    // ===============================================
+    // CONTACT STATUS
+    // ===============================================
+
+    if (
+      contact.status !==
+      "active"
+    ) {
+      await supabase
+        .from(
+          "campaign_recipients"
+        )
+        .update({
+          status:
+            "skipped",
+
+          error_message:
+            "El contacto ya no está habilitado para recibir comunicaciones.",
+
+          last_attempt_at:
+            new Date().toISOString(),
+
+          attempt_count:
+            Number(
+              recipient.attempt_count ??
+              0
+            ) + 1,
+        })
+        .eq(
+          "id",
+          recipient.id
+        )
+        .eq(
+          "campaign_id",
+          campaignId
+        )
+        .eq(
+          "status",
+          "prepared"
+        );
+
+      continue;
+    }
+
+    // ===============================================
+    // CONSENTIMIENTO EN LIVE
+    // ===============================================
+
+    if (
+      campaign.execution_mode ===
+        "live" &&
+      contact.opted_in !==
+        true
+    ) {
+      await supabase
+        .from(
+          "campaign_recipients"
+        )
+        .update({
+          status:
+            "skipped",
+
+          error_message:
+            "El contacto no tiene consentimiento habilitado para mensajería en producción.",
+
+          last_attempt_at:
+            new Date().toISOString(),
+
+          attempt_count:
+            Number(
+              recipient.attempt_count ??
+              0
+            ) + 1,
+        })
+        .eq(
+          "id",
+          recipient.id
+        )
+        .eq(
+          "campaign_id",
+          campaignId
+        )
+        .eq(
+          "status",
+          "prepared"
+        );
+
+      continue;
+    }
+
+    // ===============================================
+    // CLAIM
+    // ===============================================
+
+    const processingAt =
+      new Date().toISOString();
+
+    const {
+      data:
+        claimed,
     } = await supabase
       .from(
         "campaign_recipients"
       )
       .update({
         status:
-          "simulated",
-
-        simulated_at:
-          processedAt,
+          "processing",
 
         last_attempt_at:
-          processedAt,
+          processingAt,
 
         attempt_count:
           Number(
             recipient.attempt_count ??
             0
           ) + 1,
-
-        external_message_id:
-          `simulation:${crypto.randomUUID()}`,
       })
       .eq(
         "id",
@@ -606,23 +778,133 @@ export async function processSimulationCampaign({
       )
       .maybeSingle();
 
-    if (updateError) {
-      console.error(
-        "Error procesando destinatario:",
-        updateError
-      );
-
+    if (!claimed) {
       continue;
     }
 
-    if (updated) {
+    // ===============================================
+    // PROVIDER
+    // ===============================================
+
+    try {
+      const result =
+        await provider.sendMessage({
+          recipientId:
+            recipient.id,
+
+          contactId:
+            recipient.contact_id,
+
+          phone:
+            contact.phone_e164,
+
+          message:
+            recipient.rendered_message,
+        });
+
+      if (
+        !result.success
+      ) {
+        await supabase
+          .from(
+            "campaign_recipients"
+          )
+          .update({
+            status:
+              "failed",
+
+            error_message:
+              result.error ??
+              "El proveedor rechazó el mensaje.",
+
+            external_message_id:
+              result.externalMessageId,
+          })
+          .eq(
+            "id",
+            recipient.id
+          )
+          .eq(
+            "campaign_id",
+            campaignId
+          );
+
+        continue;
+      }
+
+      // =============================================
+      // SUCCESS
+      // =============================================
+
+      await supabase
+        .from(
+          "campaign_recipients"
+        )
+        .update({
+          status:
+            campaign.execution_mode ===
+            "simulation"
+              ? "simulated"
+              : "sent",
+
+          simulated_at:
+            result.simulatedAt,
+
+          sent_at:
+            result.sentAt,
+
+          external_message_id:
+            result.externalMessageId,
+
+          error_message:
+            null,
+        })
+        .eq(
+          "id",
+          recipient.id
+        )
+        .eq(
+          "campaign_id",
+          campaignId
+        )
+        .eq(
+          "status",
+          "processing"
+        );
+
       processed +=
         1;
+    } catch (error) {
+      await supabase
+        .from(
+          "campaign_recipients"
+        )
+        .update({
+          status:
+            "failed",
+
+          error_message:
+            error instanceof Error
+              ? error.message
+              : "Error inesperado del proveedor.",
+        })
+        .eq(
+          "id",
+          recipient.id
+        )
+        .eq(
+          "campaign_id",
+          campaignId
+        )
+        .eq(
+          "status",
+          "processing"
+        );
     }
   }
 
   // ===================================================
-  // REMAINING
+  // CAMPAIGN TOTALS
   // ===================================================
 
   const remaining =
@@ -631,8 +913,32 @@ export async function processSimulationCampaign({
       campaignId
     );
 
+  const sentCount =
+    await countByStatus(
+      supabase,
+      campaignId,
+      "sent"
+    );
+
+  const failedCount =
+    await countByStatus(
+      supabase,
+      campaignId,
+      "failed"
+    );
+
+  const processingCount =
+    await countByStatus(
+      supabase,
+      campaignId,
+      "processing"
+    );
+
   if (
-    remaining === 0
+    remaining ===
+      0 &&
+    processingCount ===
+      0
   ) {
     await supabase
       .from(
@@ -641,6 +947,12 @@ export async function processSimulationCampaign({
       .update({
         status:
           "completed",
+
+        sent_count:
+          sentCount,
+
+        failed_count:
+          failedCount,
 
         next_run_at:
           null,
@@ -662,20 +974,25 @@ export async function processSimulationCampaign({
 
       processed,
 
-      remaining: 0,
+      remaining:
+        0,
 
-      completed: true,
+      completed:
+        true,
 
       nextRunAt:
         null,
 
       message:
-        `Simulación completada. Se procesaron ${processed} destinatarios en esta ejecución.`,
+        campaign.execution_mode ===
+        "simulation"
+          ? `Simulación completada. Se procesaron ${processed} destinatarios en esta ejecución.`
+          : `Campaña completada. Se procesaron ${processed} destinatarios en esta ejecución.`,
     };
   }
 
   // ===================================================
-  // NEXT RECIPIENT
+  // NEXT
   // ===================================================
 
   const nextScheduled =
@@ -693,23 +1010,37 @@ export async function processSimulationCampaign({
           now,
           schedule
         )
-      : findNextAllowedWindow(
-          now,
-          schedule
+      : new Date(
+          now.getTime() +
+            60 *
+              1000
         );
 
-  await updateCampaignTiming(
-    supabase,
-    campaign.id,
-    campaign.organization_id,
-    {
-      nextRunAt:
+  await supabase
+    .from(
+      "campaigns"
+    )
+    .update({
+      sent_count:
+        sentCount,
+
+      failed_count:
+        failedCount,
+
+      next_run_at:
         nextRun.toISOString(),
 
-      lastRunAt:
+      last_run_at:
         now.toISOString(),
-    }
-  );
+    })
+    .eq(
+      "id",
+      campaign.id
+    )
+    .eq(
+      "organization_id",
+      campaign.organization_id
+    );
 
   return {
     campaignId,
@@ -718,14 +1049,78 @@ export async function processSimulationCampaign({
 
     remaining,
 
-    completed: false,
+    completed:
+      false,
 
     nextRunAt:
       nextRun.toISOString(),
 
     message:
-      `Se simularon ${processed} destinatarios. Quedan ${remaining} pendientes.`,
+      campaign.execution_mode ===
+      "simulation"
+        ? `Se simularon ${processed} destinatarios. Quedan ${remaining} pendientes.`
+        : `Se procesaron ${processed} destinatarios. Quedan ${remaining} pendientes.`,
   };
+}
+
+// =====================================================
+// FAILED
+// =====================================================
+
+async function markFailed({
+  supabase,
+  recipientId,
+  campaignId,
+  attemptCount,
+  error,
+}: {
+  supabase:
+    SupabaseClient;
+
+  recipientId:
+    string;
+
+  campaignId:
+    string;
+
+  attemptCount:
+    number;
+
+  error:
+    string;
+}) {
+  await supabase
+    .from(
+      "campaign_recipients"
+    )
+    .update({
+      status:
+        "failed",
+
+      error_message:
+        error,
+
+      last_attempt_at:
+        new Date().toISOString(),
+
+      attempt_count:
+        Number(
+          attemptCount ??
+          0
+        ) + 1,
+    })
+    .eq(
+      "id",
+      recipientId
+    )
+    .eq(
+      "campaign_id",
+      campaignId
+    )
+    .eq(
+      "status",
+      "prepared"
+    );
 }
 
 // =====================================================
@@ -753,9 +1148,33 @@ async function handleNoDueRecipients(
       campaign.id
     );
 
+  const processing =
+    await countByStatus(
+      supabase,
+      campaign.id,
+      "processing"
+    );
+
   if (
-    remaining === 0
+    remaining ===
+      0 &&
+    processing ===
+      0
   ) {
+    const sentCount =
+      await countByStatus(
+        supabase,
+        campaign.id,
+        "sent"
+      );
+
+    const failedCount =
+      await countByStatus(
+        supabase,
+        campaign.id,
+        "failed"
+      );
+
     await supabase
       .from(
         "campaigns"
@@ -763,6 +1182,12 @@ async function handleNoDueRecipients(
       .update({
         status:
           "completed",
+
+        sent_count:
+          sentCount,
+
+        failed_count:
+          failedCount,
 
         next_run_at:
           null,
@@ -783,11 +1208,14 @@ async function handleNoDueRecipients(
       campaignId:
         campaign.id,
 
-      processed: 0,
+      processed:
+        0,
 
-      remaining: 0,
+      remaining:
+        0,
 
-      completed: true,
+      completed:
+        true,
 
       nextRunAt:
         null,
@@ -812,9 +1240,10 @@ async function handleNoDueRecipients(
           now,
           schedule
         )
-      : findNextAllowedWindow(
-          now,
-          schedule
+      : new Date(
+          now.getTime() +
+            60 *
+              1000
         );
 
   await updateCampaignTiming(
@@ -834,11 +1263,13 @@ async function handleNoDueRecipients(
     campaignId:
       campaign.id,
 
-    processed: 0,
+    processed:
+      0,
 
     remaining,
 
-    completed: false,
+    completed:
+      false,
 
     nextRunAt:
       nextRun.toISOString(),
@@ -849,7 +1280,7 @@ async function handleNoDueRecipients(
 }
 
 // =====================================================
-// COUNT
+// COUNT PREPARED
 // =====================================================
 
 async function countPrepared(
@@ -857,6 +1288,27 @@ async function countPrepared(
     SupabaseClient,
 
   campaignId:
+    string
+) {
+  return await countByStatus(
+    supabase,
+    campaignId,
+    "prepared"
+  );
+}
+
+// =====================================================
+// COUNT STATUS
+// =====================================================
+
+async function countByStatus(
+  supabase:
+    SupabaseClient,
+
+  campaignId:
+    string,
+
+  status:
     string
 ) {
   const {
@@ -881,7 +1333,7 @@ async function countPrepared(
     )
     .eq(
       "status",
-      "prepared"
+      status
     );
 
   return count ??
@@ -889,7 +1341,7 @@ async function countPrepared(
 }
 
 // =====================================================
-// NEXT RECIPIENT
+// NEXT PREPARED
 // =====================================================
 
 async function getNextPreparedSchedule(
@@ -923,7 +1375,9 @@ async function getNextPreparedSchedule(
           true,
       }
     )
-    .limit(1)
+    .limit(
+      1
+    )
     .maybeSingle();
 
   return data?.scheduled_for ??
@@ -931,7 +1385,7 @@ async function getNextPreparedSchedule(
 }
 
 // =====================================================
-// UPDATE CAMPAIGN TIMING
+// UPDATE TIMING
 // =====================================================
 
 async function updateCampaignTiming(
@@ -977,129 +1431,7 @@ async function updateCampaignTiming(
 }
 
 // =====================================================
-// HOUR AVAILABILITY
-// =====================================================
-
-async function calculateNextHourlyAvailability(
-  supabase:
-    SupabaseClient,
-
-  campaignId:
-    string,
-
-  now:
-    Date,
-
-  schedule:
-    WorkerSchedule
-) {
-  const hourAgo =
-    new Date(
-      now.getTime() -
-        60 *
-          60 *
-          1000
-    );
-
-  const {
-    data,
-  } = await supabase
-    .from(
-      "campaign_recipients"
-    )
-    .select(
-      "simulated_at"
-    )
-    .eq(
-      "campaign_id",
-      campaignId
-    )
-    .eq(
-      "status",
-      "simulated"
-    )
-    .gte(
-      "simulated_at",
-      hourAgo.toISOString()
-    )
-    .order(
-      "simulated_at",
-      {
-        ascending:
-          true,
-      }
-    )
-    .limit(1)
-    .maybeSingle();
-
-  if (
-    !data?.simulated_at
-  ) {
-    return new Date(
-      now.getTime() +
-        5 *
-          60 *
-          1000
-    );
-  }
-
-  const calculated =
-    new Date(
-      new Date(
-        data.simulated_at
-      ).getTime() +
-        60 *
-          60 *
-          1000 +
-        1000
-    );
-
-  return getEffectiveNextRun(
-    calculated,
-    now,
-    schedule
-  );
-}
-
-// =====================================================
-// NEXT EFFECTIVE RUN
-// =====================================================
-
-function getEffectiveNextRun(
-  candidateDate:
-    Date,
-
-  now:
-    Date,
-
-  schedule:
-    WorkerSchedule
-) {
-  let candidate =
-    new Date(
-      Math.max(
-        candidateDate.getTime(),
-        now.getTime()
-      )
-    );
-
-  if (
-    isInsideScheduleWindow(
-      candidate,
-      schedule
-    )
-  ) {
-    return candidate;
-  }
-
-  return findNextAllowedWindow(
-    candidate,
-    schedule
-  );
-}
-
-// =====================================================
-// SCHEDULE CONFIG
+// CONFIG
 // =====================================================
 
 function parseScheduleConfig(
@@ -1154,21 +1486,21 @@ function parseScheduleConfig(
       ? config.allowedWeekdays
           .map(
             (
-              value
+              day
             ) =>
               Number(
-                value
+                day
               )
           )
           .filter(
             (
-              value
+              day
             ) =>
               Number.isInteger(
-                value
+                day
               ) &&
-              value >= 1 &&
-              value <= 7
+              day >= 1 &&
+              day <= 7
           )
       : fallback.allowedWeekdays;
 
@@ -1216,7 +1548,7 @@ function parseScheduleConfig(
 }
 
 // =====================================================
-// INSIDE WINDOW
+// WINDOW
 // =====================================================
 
 function isInsideScheduleWindow(
@@ -1257,8 +1589,10 @@ function isInsideScheduleWindow(
     );
 
   if (
-    start === null ||
-    end === null
+    start ===
+      null ||
+    end ===
+      null
   ) {
     return false;
   }
@@ -1273,6 +1607,43 @@ function isInsideScheduleWindow(
       start &&
     current <=
       end
+  );
+}
+
+// =====================================================
+// NEXT EFFECTIVE
+// =====================================================
+
+function getEffectiveNextRun(
+  candidateDate:
+    Date,
+
+  now:
+    Date,
+
+  schedule:
+    WorkerSchedule
+) {
+  const candidate =
+    new Date(
+      Math.max(
+        candidateDate.getTime(),
+        now.getTime()
+      )
+    );
+
+  if (
+    isInsideScheduleWindow(
+      candidate,
+      schedule
+    )
+  ) {
+    return candidate;
+  }
+
+  return findNextAllowedWindow(
+    candidate,
+    schedule
   );
 }
 
@@ -1302,12 +1673,19 @@ function findNextAllowedWindow(
   }
 
   let candidate =
-    new Date(date);
+    new Date(
+      date
+    );
 
   for (
-    let iteration = 0;
-    iteration < 14;
-    iteration += 1
+    let iteration =
+      0;
+
+    iteration <
+    14;
+
+    iteration +=
+      1
   ) {
     const local =
       getArgentinaLocalParts(
@@ -1341,7 +1719,7 @@ function findNextAllowedWindow(
           local.day,
           Math.floor(
             startMinutes /
-            60
+              60
           ),
           startMinutes %
             60
@@ -1371,7 +1749,7 @@ function findNextAllowedWindow(
 }
 
 // =====================================================
-// NEXT DAY START
+// NEXT DAY
 // =====================================================
 
 function findNextAllowedDayStart(
@@ -1402,9 +1780,14 @@ function findNextAllowedDayStart(
     );
 
   for (
-    let iteration = 0;
-    iteration < 14;
-    iteration += 1
+    let iteration =
+      0;
+
+    iteration <
+    14;
+
+    iteration +=
+      1
   ) {
     const local =
       getArgentinaLocalParts(
@@ -1507,7 +1890,7 @@ function argentinaLocalToUtc(
 }
 
 // =====================================================
-// NEXT DAY
+// NEXT ARGENTINA DAY
 // =====================================================
 
 function nextArgentinaDayAt(
@@ -1522,7 +1905,7 @@ function nextArgentinaDayAt(
       date
     );
 
-  const pseudoDate =
+  const nextDay =
     new Date(
       Date.UTC(
         local.year,
@@ -1534,13 +1917,13 @@ function nextArgentinaDayAt(
     );
 
   return argentinaLocalToUtc(
-    pseudoDate.getUTCFullYear(),
-    pseudoDate.getUTCMonth() +
+    nextDay.getUTCFullYear(),
+    nextDay.getUTCMonth() +
       1,
-    pseudoDate.getUTCDate(),
+    nextDay.getUTCDate(),
     Math.floor(
       minutes /
-      60
+        60
     ),
     minutes %
       60
@@ -1548,7 +1931,7 @@ function nextArgentinaDayAt(
 }
 
 // =====================================================
-// START LOCAL DAY
+// DAY START
 // =====================================================
 
 function getArgentinaDayStartUtc(
@@ -1627,10 +2010,14 @@ function parseTimeToMinutes(
     );
 
   if (
-    hour < 0 ||
-    hour > 23 ||
-    minute < 0 ||
-    minute > 59
+    hour <
+      0 ||
+    hour >
+      23 ||
+    minute <
+      0 ||
+    minute >
+      59
   ) {
     return null;
   }
